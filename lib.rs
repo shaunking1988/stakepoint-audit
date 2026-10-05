@@ -2659,6 +2659,10 @@ pub mod staking_program {
         
         let project_key = ctx.accounts.project.key();
         
+        // Settle the accumulator before any rate change so the new rate is
+        // never applied to the preceding interval
+        settle_global_reward1(&mut ctx.accounts.project)?;
+
         let project_mut = &mut ctx.accounts.project;
         project_mut.total_rewards_deposited = project_mut.total_rewards_deposited
             .checked_add(actual_received)
@@ -2670,22 +2674,24 @@ pub mod staking_program {
             }
             
             1 => {
-                // Dynamic: recalculate rate from remaining rewards and time
-                require!(project_mut.total_rewards_claimed <= u64::MAX as u128, ErrorCode::MathOverflow);
-                let total_available = project_mut.total_rewards_deposited
-                    .checked_sub(project_mut.total_rewards_claimed as u64)
-                    .ok_or(ErrorCode::MathOverflow)?;
-                
                 let current_time = Clock::get()?.unix_timestamp;
                 let time_remaining = project_mut.pool_end_time
                     .checked_sub(current_time)
                     .unwrap_or(0);
-                
-                if time_remaining > 0 {
-                    project_mut.reward_rate_per_second = total_available
-                        .checked_div(time_remaining as u64)
-                        .unwrap_or(0);
-                }
+
+                // A top-up after the pool has ended would strand the tokens
+                require!(time_remaining > 0, ErrorCode::PoolEnded);
+
+                // Add only the newly deposited amount to the existing rate.
+                // Recomputing from deposited minus claimed would promise
+                // accrued but unclaimed rewards a second time.
+                let rate_increment = actual_received
+                    .checked_div(time_remaining as u64)
+                    .unwrap_or(0);
+
+                project_mut.reward_rate_per_second = project_mut.reward_rate_per_second
+                    .checked_add(rate_increment)
+                    .ok_or(ErrorCode::MathOverflow)?;
             }
             
             _ => return Err(ErrorCode::InvalidRateMode.into()),
@@ -3186,23 +3192,24 @@ pub mod staking_program {
     }
 }
 
-fn update_reward1(project: &mut Account<Project1>, stake: &mut Account<Stake1>) -> Result<()> {
+// Advances the global accumulator only, with no stake account. Called before
+// a rate change so the new rate is never applied to the preceding interval.
+fn settle_global_reward1(project: &mut Account<Project1>) -> Result<()> {
     let current_time = Clock::get()?.unix_timestamp;
-    
+
     // Cap effective time at pool end
     let effective_now = if current_time > project.pool_end_time {
         project.pool_end_time
     } else {
         current_time
     };
-    
-    // Update global accumulator
+
     if project.total_staked > 0 && effective_now > project.last_update_time {
         let time_delta = effective_now
             .checked_sub(project.last_update_time)
             .unwrap_or(0)
             .max(0) as u128;
-        
+
         if time_delta > 0 {
             let reward_per_token_increment = if project.rate_mode == 0 {
                 // Fixed APY: rate is per-token, no division by total_staked
@@ -3223,14 +3230,20 @@ fn update_reward1(project: &mut Account<Project1>, stake: &mut Account<Stake1>) 
                     .checked_div(project.total_staked as u128)
                     .ok_or(ErrorCode::DivisionByZero)?
             };
-            
+
             project.reward_per_token_stored = project.reward_per_token_stored
                 .checked_add(reward_per_token_increment)
                 .ok_or(ErrorCode::MathOverflow)?;
         }
     }
-    
+
     project.last_update_time = effective_now;
+
+    Ok(())
+}
+
+fn update_reward1(project: &mut Account<Project1>, stake: &mut Account<Stake1>) -> Result<()> {
+    settle_global_reward1(project)?;
     
     // Update user rewards using accumulator diff
     if stake.amount > 0 {
