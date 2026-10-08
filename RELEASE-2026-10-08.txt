@@ -1,21 +1,27 @@
 StakePoint audit remediation release
 
 Remediated source     lib_remediated_2026-10-08.rs
+                      sha256 516afcfb90508e4125302deee102f94eacf867fd7f8989c3d801c4759c54821c
                       also at programs/staking-program/src/lib.rs so the workspace builds it
 Previous source       lib_current_deployed.rs, unchanged, as reviewed
 
 Program ID            gLHaGJsZ6G7AXZxoDL9EsSWkRbKAWhFHi73gVfNXuzK
 ProgramData           46XyGNqwPScDoeayDVWZrkKpvn4eUBdvrB3SY2TRReAm
 Upgrade authority     9BMgyCjMsPmSTedyJtc6B1VaFqHugyHQsbbMADMGSHbF (Squads 3-of-4)
-Deployed in slot      454638982
-Previous slot         453574257
 Deployed              2026-10-08
 
+Deploy 1, slot        454638982   remediation of SP-DEF-01 to 18 and the advisories
 Binary size           1065104 bytes
 Binary sha256         2d820fdb5fa61fb403581e642c1e068dccdcebae8f5cdb461e60e6fcd5740c2e
+
+Deploy 2, slot        454670815   retest items
+Binary size           1063728 bytes
+Binary sha256         1eb79f89c32135da2c2b53621e0890b527b94988cdb4c819c12847d8691d875e
+                      V1 initialize_pool accepts rate mode 0 only
+                      V1 deposit_rewards rejects rate mode 1
 
 Toolchain             anchor 0.32.1, cargo build-sbf 2.3.12, rustc 1.84.1
 Build command         anchor build, from the workspace root
 Release profile       overflow-checks = true, lto = "fat", codegen-units = 1
 
-On-chain IDL          updated and verified in the same release
+IDL                   unchanged by deploy 2, no new or altered instructions

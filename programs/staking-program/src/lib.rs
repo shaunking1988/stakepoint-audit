@@ -184,7 +184,8 @@ pub mod staking_program {
             ErrorCode::InvalidRateBps
         );
 
-        require!(params.rate_mode == 0 || params.rate_mode == 1, ErrorCode::InvalidRateMode);
+        // V1 creates locks and fixed APY pools only. Dynamic pools are V2.
+        require!(params.rate_mode == 0, ErrorCode::InvalidRateMode);
 
         if params.referrer_split_bps.is_some() {
             require!(
@@ -1313,7 +1314,11 @@ pub mod staking_program {
         }
         
         1 => {
-            // Dynamic pool - recalculate based on total available rewards
+            // V1 dynamic top ups are rejected. Recomputing the rate here
+            // re-prices every staker's unsettled interval, which is SP-DEF-04.
+            // Cover shortfalls with a direct transfer to the reward vault,
+            // which pays claims without touching the emission rate.
+            return Err(ErrorCode::InvalidRateMode.into());
             let total_available = project_mut.total_rewards_deposited
                 .checked_sub(project_mut.total_rewards_claimed)
                 .ok_or(ErrorCode::MathOverflow)?;
