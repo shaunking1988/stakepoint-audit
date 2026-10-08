@@ -7,6 +7,77 @@
   },
   "instructions": [
     {
+      "name": "accept_platform_admin",
+      "discriminator": [
+        138,
+        66,
+        59,
+        92,
+        174,
+        222,
+        99,
+        82
+      ],
+      "accounts": [
+        {
+          "name": "platform",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109,
+                  95,
+                  118,
+                  50
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pending_admin",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  110,
+                  100,
+                  105,
+                  110,
+                  103,
+                  95,
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "new_admin",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "admin_set_reflection_token",
       "discriminator": [
         124,
@@ -2089,145 +2160,6 @@
       ]
     },
     {
-      "name": "pause_project",
-      "discriminator": [
-        8,
-        68,
-        240,
-        82,
-        45,
-        162,
-        129,
-        230
-      ],
-      "accounts": [
-        {
-          "name": "project",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  114,
-                  111,
-                  106,
-                  101,
-                  99,
-                  116
-                ]
-              },
-              {
-                "kind": "arg",
-                "path": "token_mint"
-              },
-              {
-                "kind": "arg",
-                "path": "pool_id"
-              }
-            ]
-          }
-        },
-        {
-          "name": "admin",
-          "writable": true,
-          "signer": true
-        }
-      ],
-      "args": [
-        {
-          "name": "token_mint",
-          "type": "pubkey"
-        },
-        {
-          "name": "pool_id",
-          "type": "u64"
-        }
-      ]
-    },
-    {
-      "name": "platform_unpause_project",
-      "discriminator": [
-        236,
-        127,
-        137,
-        135,
-        172,
-        90,
-        126,
-        98
-      ],
-      "accounts": [
-        {
-          "name": "platform",
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  108,
-                  97,
-                  116,
-                  102,
-                  111,
-                  114,
-                  109,
-                  95,
-                  118,
-                  50
-                ]
-              }
-            ]
-          }
-        },
-        {
-          "name": "project",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  114,
-                  111,
-                  106,
-                  101,
-                  99,
-                  116
-                ]
-              },
-              {
-                "kind": "arg",
-                "path": "token_mint"
-              },
-              {
-                "kind": "arg",
-                "path": "pool_id"
-              }
-            ]
-          }
-        },
-        {
-          "name": "admin",
-          "writable": true,
-          "signer": true
-        }
-      ],
-      "args": [
-        {
-          "name": "_token_mint",
-          "type": "pubkey"
-        },
-        {
-          "name": "_pool_id",
-          "type": "u64"
-        }
-      ]
-    },
-    {
       "name": "refresh_reflections",
       "discriminator": [
         123,
@@ -2592,6 +2524,87 @@
       ]
     },
     {
+      "name": "set_crank_authority",
+      "discriminator": [
+        158,
+        239,
+        112,
+        185,
+        20,
+        25,
+        150,
+        203
+      ],
+      "accounts": [
+        {
+          "name": "platform",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109,
+                  95,
+                  118,
+                  50
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "crank",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  114,
+                  97,
+                  110,
+                  107,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_authority",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
       "name": "set_custom_fees1",
       "discriminator": [
         157,
@@ -2802,6 +2815,117 @@
       ]
     },
     {
+      "name": "settle_stake",
+      "discriminator": [
+        89,
+        179,
+        109,
+        99,
+        144,
+        236,
+        213,
+        76
+      ],
+      "accounts": [
+        {
+          "name": "project",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  106,
+                  101,
+                  99,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "token_mint"
+              },
+              {
+                "kind": "arg",
+                "path": "pool_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "stake",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  116,
+                  97,
+                  107,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "project"
+              },
+              {
+                "kind": "account",
+                "path": "stake.user",
+                "account": "Stake"
+              }
+            ]
+          }
+        },
+        {
+          "name": "crank",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  114,
+                  97,
+                  110,
+                  107,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "cranker",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "_token_mint",
+          "type": "pubkey"
+        },
+        {
+          "name": "_pool_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "transfer_admin",
       "discriminator": [
         42,
@@ -2900,33 +3024,7 @@
           }
         },
         {
-          "name": "admin",
-          "writable": true,
-          "signer": true
-        }
-      ],
-      "args": [
-        {
-          "name": "new_admin",
-          "type": "pubkey"
-        }
-      ]
-    },
-    {
-      "name": "unpause_project",
-      "discriminator": [
-        65,
-        73,
-        219,
-        36,
-        147,
-        9,
-        150,
-        90
-      ],
-      "accounts": [
-        {
-          "name": "project",
+          "name": "pending_admin",
           "writable": true,
           "pda": {
             "seeds": [
@@ -2934,21 +3032,19 @@
                 "kind": "const",
                 "value": [
                   112,
-                  114,
-                  111,
-                  106,
                   101,
-                  99,
-                  116
+                  110,
+                  100,
+                  105,
+                  110,
+                  103,
+                  95,
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
                 ]
-              },
-              {
-                "kind": "arg",
-                "path": "token_mint"
-              },
-              {
-                "kind": "arg",
-                "path": "pool_id"
               }
             ]
           }
@@ -2957,16 +3053,16 @@
           "name": "admin",
           "writable": true,
           "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": [
         {
-          "name": "token_mint",
+          "name": "new_admin",
           "type": "pubkey"
-        },
-        {
-          "name": "pool_id",
-          "type": "u64"
         }
       ]
     },
@@ -3502,6 +3598,19 @@
   ],
   "accounts": [
     {
+      "name": "CrankAuthority",
+      "discriminator": [
+        209,
+        74,
+        172,
+        132,
+        228,
+        39,
+        186,
+        2
+      ]
+    },
+    {
       "name": "ExtraReward",
       "discriminator": [
         79,
@@ -3512,6 +3621,19 @@
         244,
         44,
         91
+      ]
+    },
+    {
+      "name": "PendingAdmin",
+      "discriminator": [
+        220,
+        45,
+        135,
+        16,
+        196,
+        153,
+        181,
+        56
       ]
     },
     {
@@ -3696,6 +3818,19 @@
         138,
         207,
         234
+      ]
+    },
+    {
+      "name": "PlatformAdminTransferProposed",
+      "discriminator": [
+        121,
+        145,
+        7,
+        2,
+        96,
+        59,
+        34,
+        140
       ]
     },
     {
@@ -4177,6 +4312,36 @@
       "code": 6053,
       "name": "FeeTooHigh",
       "msg": "Fee exceeds the maximum allowed"
+    },
+    {
+      "code": 6054,
+      "name": "NativeSolUnsupported",
+      "msg": "Native SOL is not supported as a staking or reward asset"
+    },
+    {
+      "code": 6055,
+      "name": "LockNotOwnedByDepositor",
+      "msg": "Only the lock owner can deposit into this lock"
+    },
+    {
+      "code": 6056,
+      "name": "MintArgumentMismatch",
+      "msg": "The mint argument does not match the supplied mint account"
+    },
+    {
+      "code": 6057,
+      "name": "ReflectionMintMismatch",
+      "msg": "The configured reflection mint does not match the reflection account"
+    },
+    {
+      "code": 6058,
+      "name": "FixedModeRequiresSameMint",
+      "msg": "Fixed APY requires the reward token to be the staking token"
+    },
+    {
+      "code": 6059,
+      "name": "ZeroRateIncrement",
+      "msg": "Deposit is too small to increase the reward rate"
     }
   ],
   "types": [
@@ -4196,6 +4361,22 @@
           {
             "name": "new_admin",
             "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CrankAuthority",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
           }
         ]
       }
@@ -4485,6 +4666,22 @@
       }
     },
     {
+      "name": "PendingAdmin",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pending",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
       "name": "Platform",
       "type": {
         "kind": "struct",
@@ -4512,6 +4709,22 @@
           {
             "name": "bump",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PlatformAdminTransferProposed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "current_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_admin",
+            "type": "pubkey"
           }
         ]
       }

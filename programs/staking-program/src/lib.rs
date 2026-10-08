@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
-use anchor_spl::associated_token::{AssociatedToken, Create as CreateAssociatedToken, create as create_ata, get_associated_token_address_with_program_id};
+use anchor_spl::associated_token::{AssociatedToken, Create as CreateAssociatedToken, create_idempotent as create_ata_idempotent, get_associated_token_address_with_program_id};
 use anchor_spl::token::{self as token, Token};
 use anchor_spl::token_interface::{
     self as token_interface,
@@ -34,26 +34,9 @@ fn transfer_tokens<'info>(
     signer_seeds: Option<&[&[&[u8]]]>,
 ) -> Result<()> {
     if is_native_sol(&mint.key()) {
-        msg!("💰 Transferring Native SOL: {} lamports", amount);
-        
-        // ✅ For Native SOL, use authority as the source (handles duplicate account issue)
-        let authority_lamports = authority.lamports();
-        let to_lamports = to.lamports();
-        
-        require!(
-            authority_lamports >= amount,
-            ErrorCode::InsufficientBalance
-        );
-        
-        **authority.try_borrow_mut_lamports()? = authority_lamports
-            .checked_sub(amount)
-            .ok_or(ErrorCode::MathOverflow)?;
-        
-        **to.try_borrow_mut_lamports()? = to_lamports
-            .checked_add(amount)
-            .ok_or(ErrorCode::MathOverflow)?;
-        
-        msg!("✅ Native SOL transfer complete");
+        // Native SOL is not a supported staking or reward asset.
+        let _ = &system_program;
+        return Err(ErrorCode::NativeSolUnsupported.into());
     } else {
         // SPL Token or Token-2022 transfer
         msg!("🪙 Transferring SPL/Token-2022: {} units", amount);
@@ -115,6 +98,12 @@ pub mod staking_program {
         token_mint: Pubkey,
         pool_id: u64,
     ) -> Result<()> {
+        require!(
+            token_mint == ctx.accounts.token_mint.key(),
+            ErrorCode::MintArgumentMismatch
+        );
+        require!(!is_native_sol(&token_mint), ErrorCode::NativeSolUnsupported);
+
         let project = &mut ctx.accounts.project;
         
         project.admin = ctx.accounts.admin.key();
@@ -194,6 +183,8 @@ pub mod staking_program {
             params.rate_bps_per_year <= 1_000_000,
             ErrorCode::InvalidRateBps
         );
+
+        require!(params.rate_mode == 0 || params.rate_mode == 1, ErrorCode::InvalidRateMode);
 
         if params.referrer_split_bps.is_some() {
             require!(
@@ -308,6 +299,22 @@ pub mod staking_program {
                 let associated_token_program = ctx.accounts.associated_token_program.as_ref()
                     .ok_or(ErrorCode::MissingAssociatedTokenProgram)?;
 
+                // Fail early on a wrong program or a non mint account rather
+                // than relying on the CPI to notice.
+                require!(
+                    associated_token_program.key() == anchor_spl::associated_token::ID,
+                    ErrorCode::MissingAssociatedTokenProgram
+                );
+                require!(
+                    reflection_token_program.key() == anchor_spl::token::ID
+                        || reflection_token_program.key() == anchor_spl::token_2022::ID,
+                    ErrorCode::ReflectionTokenRequired
+                );
+                require!(
+                    reflection_token_mint.owner == reflection_token_program.key,
+                    ErrorCode::ReflectionTokenRequired
+                );
+
                 let cpi_accounts = CreateAssociatedToken {
                     payer: ctx.accounts.admin.to_account_info(),
                     associated_token: reflection_token_account.to_account_info(),
@@ -323,7 +330,29 @@ pub mod staking_program {
                     signer_seeds,
                 );
 
-                create_ata(cpi_ctx)?;
+                create_ata_idempotent(cpi_ctx)?;
+
+                // Idempotent create succeeds when the account already exists,
+                // so confirm it really is the project's account for the
+                // reflection mint before storing it.
+                {
+                    let data = reflection_token_account.try_borrow_data()?;
+                    require!(data.len() >= 72, ErrorCode::InvalidReflectionVault);
+                    let acc_mint = Pubkey::new_from_array(
+                        data[0..32].try_into().unwrap()
+                    );
+                    let acc_owner = Pubkey::new_from_array(
+                        data[32..64].try_into().unwrap()
+                    );
+                    require!(
+                        acc_mint == reflection_token_mint.key() && acc_mint == reflection_token,
+                        ErrorCode::ReflectionMintMismatch
+                    );
+                    require!(
+                        acc_owner == project.key(),
+                        ErrorCode::InvalidReflectionVault
+                    );
+                }
 
                 msg!("✅ Reflection Vault ATA created: {}", reflection_token_account.key());
                 
@@ -387,9 +416,19 @@ pub mod staking_program {
         let project_reflection_per_token_stored = ctx.accounts.project.reflection_per_token_stored;
         
         require!(project_is_initialized, ErrorCode::NotInitialized);
-        require!(!project_is_paused, ErrorCode::ProjectPaused);
+
         require!(!project_deposit_paused, ErrorCode::DepositsPaused);
-        
+
+        // Locks are single depositor. Each lock has its own project, so the only
+        // valid depositor is the creator making the first deposit, or the same
+        // owner adding to an existing position.
+        if project_pool_id >= 1000 {
+            require!(
+                ctx.accounts.project.total_staked == 0 || ctx.accounts.stake.amount > 0,
+                ErrorCode::LockNotOwnedByDepositor
+            );
+        }
+
         let rent_minimum = 890880u64;
         require!(
             ctx.accounts.user.lamports() >= platform_sol_fee.saturating_add(rent_minimum),
@@ -399,11 +438,9 @@ pub mod staking_program {
         let current_time = Clock::get()?.unix_timestamp;
         require!(current_time < project_pool_end_time, ErrorCode::PoolEnded);
         
-        let token_fee = amount
-            .checked_mul(platform_token_fee_bps)
-            .ok_or(ErrorCode::MathOverflow)?
-            .checked_div(10000)
-            .ok_or(ErrorCode::MathOverflow)?;
+        let token_fee = ((amount as u128)
+            .saturating_mul(platform_token_fee_bps as u128)
+            / 10_000u128) as u64;
         
         let amount_after_fee = amount
             .checked_sub(token_fee)
@@ -634,8 +671,7 @@ pub mod staking_program {
         
         // ✅ Access directly - no local variable copies
         require!(ctx.accounts.project.is_initialized, ErrorCode::NotInitialized);
-        require!(!ctx.accounts.project.is_paused, ErrorCode::ProjectPaused);
-        require!(!ctx.accounts.project.withdraw_paused, ErrorCode::WithdrawalsPaused);
+
         
         let rent_minimum = 890880u64;
         require!(
@@ -643,11 +679,9 @@ pub mod staking_program {
             ErrorCode::InsufficientSolForFee
         );
         
-        let token_fee = amount
-            .checked_mul(ctx.accounts.platform.platform_token_fee_bps)
-            .ok_or(ErrorCode::MathOverflow)?
-            .checked_div(10000)
-            .ok_or(ErrorCode::MathOverflow)?;
+        let token_fee = ((amount as u128)
+            .saturating_mul(ctx.accounts.platform.platform_token_fee_bps as u128)
+            / 10_000u128) as u64;
         
         let amount_after_fee = amount
             .checked_sub(token_fee)
@@ -853,7 +887,6 @@ pub mod staking_program {
     
     let project_is_initialized = ctx.accounts.project.is_initialized;
     let project_is_paused = ctx.accounts.project.is_paused;
-    let project_claim_paused = ctx.accounts.project.claim_paused;
     let project_token_mint = ctx.accounts.project.token_mint;
     let project_pool_id = ctx.accounts.project.pool_id;
     let project_bump = ctx.accounts.project.bump;
@@ -862,8 +895,6 @@ pub mod staking_program {
     let project_referrer_split_bps = ctx.accounts.project.referrer_split_bps;
     
     require!(project_is_initialized, ErrorCode::NotInitialized);
-    require!(!project_is_paused, ErrorCode::ProjectPaused);
-    require!(!project_claim_paused, ErrorCode::ClaimsPaused);
     require!(
         ctx.accounts.reward_vault.key() == ctx.accounts.project.reward_vault,
         ErrorCode::UnauthorizedVault
@@ -1034,7 +1065,6 @@ pub mod staking_program {
         token_mint: Pubkey,
         pool_id: u64,
     ) -> Result<()> {
-        require!(ctx.accounts.stake.rewards_pending > 0 || ctx.accounts.stake.amount > 0, ErrorCode::NoStake);
         
         require!(
             ctx.accounts.project.reflection_vault == Some(ctx.accounts.reflection_vault.key()),
@@ -1044,7 +1074,7 @@ pub mod staking_program {
         let stake = &mut ctx.accounts.stake;
 
         require!(project.is_initialized, ErrorCode::NotInitialized);
-        require!(!project.is_paused, ErrorCode::ProjectPaused);
+
         require!(project.enable_reflections, ErrorCode::ReflectionsNotEnabled);
         require!(
             project.reflection_token.is_some(),
@@ -1068,6 +1098,13 @@ pub mod staking_program {
 
         // Get decimals for transfer_checked (not needed for Native SOL)
         let decimals = if !is_native_sol {
+            // Bind the supplied mint account to the configured reflection
+            // token. Kept inside the SPL branch because the native path
+            // never reads the mint account.
+            require!(
+                ctx.accounts.reflection_token_mint.key() == reflection_token_mint,
+                ErrorCode::ReflectionMintMismatch
+            );
             ctx.accounts.reflection_token_mint.decimals
         } else {
             9 // Native SOL has 9 decimals
@@ -1151,9 +1188,12 @@ pub mod staking_program {
             }
         };
         
-        // Update project's last reflection balance
+        // Subtract only what actually left the vault, so any retained buffer
+        // stays out of the next distribution.
         let project_mut = &mut ctx.accounts.project;
-        project_mut.last_reflection_balance = current_vault_balance;
+        project_mut.last_reflection_balance = project_mut
+            .last_reflection_balance
+            .saturating_sub(amount_to_transfer);
 
         msg!("✅ Reflections claimed successfully");
         msg!("   Amount transferred: {}", amount_to_transfer);
@@ -1216,7 +1256,7 @@ pub mod staking_program {
     ) -> Result<()> {
     require!(amount > 0, ErrorCode::InvalidAmount);
     require!(ctx.accounts.project.is_initialized, ErrorCode::NotInitialized);
-    require!(!ctx.accounts.project.is_paused, ErrorCode::ProjectPaused);
+
     
     let project_key = ctx.accounts.project.key();
     
@@ -1284,9 +1324,18 @@ pub mod staking_program {
                 .unwrap_or(0);
             
             if time_remaining > 0 {
-                project_mut.reward_rate_per_second = total_available
+                let new_rate = total_available
                     .checked_div(time_remaining as u64)
                     .unwrap_or(0);
+
+                // A deposit too small to emit even one unit per second would
+                // be partly stranded.
+                require!(
+                    actual_received >= time_remaining as u64,
+                    ErrorCode::ZeroRateIncrement
+                );
+
+                project_mut.reward_rate_per_second = new_rate;
             }
             
             msg!("Dynamic pool - new rate: {}", project_mut.reward_rate_per_second);
@@ -1375,36 +1424,6 @@ pub mod staking_program {
         Ok(())
     }
 
-    pub fn platform_unpause_project(
-        ctx: Context<PlatformUnpause>,
-        _token_mint: Pubkey,
-        _pool_id: u64
-    ) -> Result<()> {
-        ctx.accounts.project.is_paused = false;
-        emit!(ProjectUnpaused { project: ctx.accounts.project.key() });
-        Ok(())
-    }
-
-    pub fn pause_project(
-        ctx: Context<PauseControl>,
-        token_mint: Pubkey,
-        pool_id: u64
-    ) -> Result<()> {
-        ctx.accounts.project.is_paused = true;
-        emit!(ProjectPaused { project: ctx.accounts.project.key() });
-        Ok(())
-    }
-
-    pub fn unpause_project(
-        ctx: Context<PauseControl>,
-        token_mint: Pubkey,
-        pool_id: u64
-    ) -> Result<()> {
-        ctx.accounts.project.is_paused = false;
-        emit!(ProjectUnpaused { project: ctx.accounts.project.key() });
-        Ok(())
-    }
-
     pub fn transfer_admin(
         ctx: Context<TransferAdmin>,
         token_mint: Pubkey,
@@ -1442,15 +1461,40 @@ pub mod staking_program {
         ctx: Context<TransferPlatformAdmin>,
         new_admin: Pubkey,
     ) -> Result<()> {
+        // Propose only. Nothing changes until the proposed wallet accepts.
+        require!(new_admin != Pubkey::default(), ErrorCode::Unauthorized);
+
+        let pending = &mut ctx.accounts.pending_admin;
+        pending.pending = new_admin;
+        pending.bump = ctx.bumps.pending_admin;
+
+        emit!(PlatformAdminTransferProposed {
+            current_admin: ctx.accounts.platform.admin,
+            proposed_admin: new_admin,
+        });
+
+        Ok(())
+    }
+
+    pub fn accept_platform_admin(ctx: Context<AcceptPlatformAdmin>) -> Result<()> {
+        let pending_key = ctx.accounts.pending_admin.pending;
+        require!(
+            pending_key == ctx.accounts.new_admin.key(),
+            ErrorCode::Unauthorized
+        );
+
         let platform = &mut ctx.accounts.platform;
         let old_admin = platform.admin;
-        platform.admin = new_admin;
-        
+        platform.admin = pending_key;
+
+        let pending = &mut ctx.accounts.pending_admin;
+        pending.pending = Pubkey::default();
+
         emit!(PlatformAdminTransferred {
             old_admin,
-            new_admin,
+            new_admin: pending_key,
         });
-        
+
         Ok(())
     }
 
@@ -1536,6 +1580,41 @@ pub mod staking_program {
             old_lockup_seconds: old,
             new_lockup_seconds,
         });
+
+        Ok(())
+    }
+
+    pub fn set_crank_authority(
+        ctx: Context<SetCrankAuthority>,
+        new_authority: Pubkey,
+    ) -> Result<()> {
+        let crank = &mut ctx.accounts.crank;
+        crank.authority = new_authority;
+        crank.bump = ctx.bumps.crank;
+        msg!("Crank authority set to {}", new_authority);
+        Ok(())
+    }
+
+    pub fn settle_stake(
+        ctx: Context<SettleStake>,
+        _token_mint: Pubkey,
+        _pool_id: u64,
+    ) -> Result<()> {
+        require!(ctx.accounts.project.is_initialized, ErrorCode::NotInitialized);
+
+        // Bank accrual to date at the conditions that actually applied over
+        // the interval, then advance only the accrual marker. The lockup
+        // clock is last_stake_timestamp and is deliberately untouched.
+        let settle_now = Clock::get()?.unix_timestamp;
+        let settle_marker = (ctx.accounts.stake.reflection_debt as i64)
+            .max(ctx.accounts.stake.last_stake_timestamp);
+        require!(
+            settle_now.saturating_sub(settle_marker) >= 86_400,
+            ErrorCode::InvalidTimestamp
+        );
+
+        update_reward(&mut ctx.accounts.project, &mut ctx.accounts.stake)?;
+        ctx.accounts.stake.reflection_debt = settle_now as u64;
 
         Ok(())
     }
@@ -1626,8 +1705,7 @@ pub mod staking_program {
         pool_id: u64,
         _extra_mint: Pubkey,
     ) -> Result<()> {
-        require!(!ctx.accounts.project.is_paused, ErrorCode::ProjectPaused);
-        require!(!ctx.accounts.project.claim_paused, ErrorCode::ClaimsPaused);
+
 
         let amount = ctx.accounts.extra_vault.amount;
         require!(amount > 0, ErrorCode::NoExtraRewardToClaim);
@@ -1675,6 +1753,17 @@ pub mod staking_program {
         pool_id: u64,
         reward_token_mint: Pubkey,
     ) -> Result<()> {
+        require!(
+            token_mint == ctx.accounts.token_mint.key(),
+            ErrorCode::MintArgumentMismatch
+        );
+        require!(
+            reward_token_mint == ctx.accounts.reward_token_mint_account.key(),
+            ErrorCode::MintArgumentMismatch
+        );
+        require!(!is_native_sol(&token_mint), ErrorCode::NativeSolUnsupported);
+        require!(!is_native_sol(&reward_token_mint), ErrorCode::NativeSolUnsupported);
+
         // Charge pool creation SOL fee
         let creation_fee = 1_000_000_000u64; // 1 SOL pool creation fee
         if creation_fee > 0 {
@@ -1774,7 +1863,17 @@ pub mod staking_program {
         require!(project.token_mint == token_mint, ErrorCode::WrongTokenType);
         require!(project.pool_id == pool_id, ErrorCode::InvalidProject);
         require!(params.rate_bps_per_year <= 1_000_000, ErrorCode::InvalidRateBps);
-        
+        require!(params.rate_mode == 0 || params.rate_mode == 1, ErrorCode::InvalidRateMode);
+
+        // Fixed APY derives the payout from staking base units, so the reward
+        // token must be the staking token for the decimals to agree.
+        if params.rate_mode == 0 {
+            require!(
+                project.reward_token_mint == project.token_mint,
+                ErrorCode::FixedModeRequiresSameMint
+            );
+        }
+
         if params.referrer_split_bps.is_some() {
             require!(
                 params.referrer_split_bps.unwrap() <= 10000,
@@ -1876,6 +1975,22 @@ pub mod staking_program {
                 let associated_token_program = ctx.accounts.associated_token_program.as_ref()
                     .ok_or(ErrorCode::MissingAssociatedTokenProgram)?;
 
+                // Fail early on a wrong program or a non mint account rather
+                // than relying on the CPI to notice.
+                require!(
+                    associated_token_program.key() == anchor_spl::associated_token::ID,
+                    ErrorCode::MissingAssociatedTokenProgram
+                );
+                require!(
+                    reflection_token_program.key() == anchor_spl::token::ID
+                        || reflection_token_program.key() == anchor_spl::token_2022::ID,
+                    ErrorCode::ReflectionTokenRequired
+                );
+                require!(
+                    reflection_token_mint.owner == reflection_token_program.key,
+                    ErrorCode::ReflectionTokenRequired
+                );
+
                 let cpi_accounts = CreateAssociatedToken {
                     payer: ctx.accounts.admin.to_account_info(),
                     associated_token: reflection_token_account.to_account_info(),
@@ -1891,7 +2006,29 @@ pub mod staking_program {
                     signer_seeds,
                 );
 
-                create_ata(cpi_ctx)?;
+                create_ata_idempotent(cpi_ctx)?;
+
+                // Idempotent create succeeds when the account already exists,
+                // so confirm it really is the project's account for the
+                // reflection mint before storing it.
+                {
+                    let data = reflection_token_account.try_borrow_data()?;
+                    require!(data.len() >= 72, ErrorCode::InvalidReflectionVault);
+                    let acc_mint = Pubkey::new_from_array(
+                        data[0..32].try_into().unwrap()
+                    );
+                    let acc_owner = Pubkey::new_from_array(
+                        data[32..64].try_into().unwrap()
+                    );
+                    require!(
+                        acc_mint == reflection_token_mint.key() && acc_mint == reflection_token,
+                        ErrorCode::ReflectionMintMismatch
+                    );
+                    require!(
+                        acc_owner == project.key(),
+                        ErrorCode::InvalidReflectionVault
+                    );
+                }
                 
                 project.reflection_vault = Some(reflection_token_account.key());
             }
@@ -1941,7 +2078,7 @@ pub mod staking_program {
         let fee_collector = ctx.accounts.platform.fee_collector;
         
         require!(ctx.accounts.project.is_initialized, ErrorCode::NotInitialized);
-        require!(!ctx.accounts.project.is_paused, ErrorCode::ProjectPaused);
+
         require!(!ctx.accounts.project.deposit_paused, ErrorCode::DepositsPaused);
         
         let rent_minimum = 890880u64;
@@ -1953,11 +2090,9 @@ pub mod staking_program {
         let current_time = Clock::get()?.unix_timestamp;
         require!(current_time < ctx.accounts.project.pool_end_time, ErrorCode::PoolEnded);
         
-        let token_fee = amount
-            .checked_mul(token_fee_bps)
-            .ok_or(ErrorCode::MathOverflow)?
-            .checked_div(10000)
-            .ok_or(ErrorCode::MathOverflow)?;
+        let token_fee = ((amount as u128)
+            .saturating_mul(token_fee_bps as u128)
+            / 10_000u128) as u64;
         
         let amount_after_fee = amount
             .checked_sub(token_fee)
@@ -2189,8 +2324,7 @@ pub mod staking_program {
         require!(ctx.accounts.stake.amount >= amount, ErrorCode::InsufficientBalance);
         
         require!(ctx.accounts.project.is_initialized, ErrorCode::NotInitialized);
-        require!(!ctx.accounts.project.is_paused, ErrorCode::ProjectPaused);
-        require!(!ctx.accounts.project.withdraw_paused, ErrorCode::WithdrawalsPaused);
+
         
         // Determine fee rates
         let token_fee_bps = if ctx.accounts.project.use_custom_fees {
@@ -2211,11 +2345,9 @@ pub mod staking_program {
             ErrorCode::InsufficientSolForFee
         );
         
-        let token_fee = amount
-            .checked_mul(token_fee_bps)
-            .ok_or(ErrorCode::MathOverflow)?
-            .checked_div(10000)
-            .ok_or(ErrorCode::MathOverflow)?;
+        let token_fee = ((amount as u128)
+            .saturating_mul(token_fee_bps as u128)
+            / 10_000u128) as u64;
         
         let amount_after_fee = amount
             .checked_sub(token_fee)
@@ -2440,8 +2572,7 @@ pub mod staking_program {
         let fee_collector = ctx.accounts.platform.fee_collector;
         
         require!(ctx.accounts.project.is_initialized, ErrorCode::NotInitialized);
-        require!(!ctx.accounts.project.is_paused, ErrorCode::ProjectPaused);
-        require!(!ctx.accounts.project.claim_paused, ErrorCode::ClaimsPaused);
+
         require!(
             ctx.accounts.reward_vault.key() == ctx.accounts.project.reward_vault,
             ErrorCode::UnauthorizedVault
@@ -2620,7 +2751,7 @@ pub mod staking_program {
     ) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidAmount);
         require!(ctx.accounts.project.is_initialized, ErrorCode::NotInitialized);
-        require!(!ctx.accounts.project.is_paused, ErrorCode::ProjectPaused);
+
         require!(
             ctx.accounts.reward_vault.key() == ctx.accounts.project.reward_vault,
             ErrorCode::UnauthorizedVault
@@ -2689,6 +2820,9 @@ pub mod staking_program {
                     .checked_div(time_remaining as u64)
                     .unwrap_or(0);
 
+                // A deposit too small to move the rate would never be emitted.
+                require!(rate_increment > 0, ErrorCode::ZeroRateIncrement);
+
                 project_mut.reward_rate_per_second = project_mut.reward_rate_per_second
                     .checked_add(rate_increment)
                     .ok_or(ErrorCode::MathOverflow)?;
@@ -2734,15 +2868,13 @@ pub mod staking_program {
         _token_mint: Pubkey,
         _pool_id: u64,
     ) -> Result<()> {
-        require!(ctx.accounts.stake.amount > 0, ErrorCode::NoStake);
-        
         require!(
             ctx.accounts.project.reflection_vault == Some(ctx.accounts.reflection_vault.key()),
             ErrorCode::InvalidReflectionVault
         );
         
         require!(ctx.accounts.project.is_initialized, ErrorCode::NotInitialized);
-        require!(!ctx.accounts.project.is_paused, ErrorCode::ProjectPaused);
+
         require!(ctx.accounts.project.enable_reflections, ErrorCode::ReflectionsNotEnabled);
         require!(
             ctx.accounts.project.reflection_token.is_some(),
@@ -2776,6 +2908,10 @@ pub mod staking_program {
         let is_native_sol = reflection_token_mint == native_sol;
         
         let decimals = if !is_native_sol {
+            require!(
+                ctx.accounts.reflection_token_mint.key() == reflection_token_mint,
+                ErrorCode::ReflectionMintMismatch
+            );
             ctx.accounts.reflection_token_mint.decimals
         } else {
             9
@@ -2839,7 +2975,9 @@ pub mod staking_program {
         };
         
         let project_mut = &mut ctx.accounts.project;
-        project_mut.last_reflection_balance = current_vault_balance;
+        project_mut.last_reflection_balance = project_mut
+            .last_reflection_balance
+            .saturating_sub(amount_to_transfer);
         
         emit!(ReflectionsClaimed {
             user: ctx.accounts.user.key(),
@@ -2887,11 +3025,9 @@ pub mod staking_program {
 
         // Calculate token fee
         let platform_token_fee_bps = ctx.accounts.platform.platform_token_fee_bps;
-        let token_fee = amount
-            .checked_mul(platform_token_fee_bps)
-            .ok_or(ErrorCode::MathOverflow)?
-            .checked_div(10000)
-            .ok_or(ErrorCode::MathOverflow)?;
+        let token_fee = ((amount as u128)
+            .saturating_mul(platform_token_fee_bps as u128)
+            / 10_000u128) as u64;
         let amount_after_fee = amount
             .checked_sub(token_fee)
             .ok_or(ErrorCode::MathOverflow)?;
@@ -3212,14 +3348,12 @@ fn settle_global_reward1(project: &mut Account<Project1>) -> Result<()> {
 
         if time_delta > 0 {
             let reward_per_token_increment = if project.rate_mode == 0 {
-                // Fixed APY: rate is per-token, no division by total_staked
-                (project.reward_rate_per_second as u128)
-                    .checked_mul(time_delta)
-                    .ok_or(ErrorCode::MathOverflow)?
-                    .checked_mul(1_000_000_000_000_000_000u128)
-                    .ok_or(ErrorCode::MathOverflow)?
-                    .checked_div(1_000_000_000u128)
-                    .ok_or(ErrorCode::DivisionByZero)?
+                // Fixed APY: rate is per-token, no division by total_staked.
+                // Computed from the configured bps for the same reason as V1.
+                (project.rate_bps_per_year as u128)
+                    .saturating_mul(time_delta)
+                    .saturating_mul(1_000_000_000_000_000_000u128)
+                    / (10_000u128 * 31_536_000u128)
             } else {
                 // Dynamic: rate is total pool emission, divide by total_staked
                 (project.reward_rate_per_second as u128)
@@ -3252,14 +3386,11 @@ fn update_reward1(project: &mut Account<Project1>, stake: &mut Account<Stake1>) 
             .ok_or(ErrorCode::MathOverflow)?;
         
         let earned = (reward_diff)
-            .checked_mul(stake.amount as u128)
-            .ok_or(ErrorCode::MathOverflow)?
-            .checked_div(1_000_000_000_000_000_000u128)
-            .ok_or(ErrorCode::DivisionByZero)?;
+            .saturating_mul(stake.amount as u128)
+            / 1_000_000_000_000_000_000u128;
         
         stake.rewards_pending = stake.rewards_pending
-            .checked_add(earned)
-            .ok_or(ErrorCode::MathOverflow)?;
+            .saturating_add(earned);
     }
     
     stake.reward_per_token_paid = project.reward_per_token_stored;
@@ -3325,15 +3456,41 @@ fn update_reflection1(
                 .checked_div(project.total_staked as u128)
                 .ok_or(ErrorCode::DivisionByZero)?;
             
-            require!(per_token <= u64::MAX as u128, ErrorCode::MathOverflow);
+            let per_token = if per_token > u64::MAX as u128 {
+                u64::MAX as u128
+            } else {
+                per_token
+            };
             
-            project.reflection_per_token_stored = project.reflection_per_token_stored
-                .checked_add(per_token as u64)
-                .ok_or(ErrorCode::MathOverflow)?;
+            let stored_before = project.reflection_per_token_stored;
+            project.reflection_per_token_stored = stored_before
+                .saturating_add(per_token as u64);
+            let applied_rate = project.reflection_per_token_stored
+                .saturating_sub(stored_before) as u128;
+
+            // Advance the baseline only by what was actually distributed, so
+            // the rounding remainder stays in the pool for the next update.
+            let distributed_u128 = applied_rate
+                .saturating_mul(project.total_staked as u128)
+                / 1_000_000_000u128;
+            let distributed = if distributed_u128 > new_reflections as u128 {
+                new_reflections
+            } else {
+                distributed_u128 as u64
+            };
+            project.last_reflection_balance = project
+                .last_reflection_balance
+                .saturating_add(distributed);
         }
     }
     
-    project.last_reflection_balance = current_balance;
+    // Only ever lower the baseline here. A decrease means reflections left the
+    // vault, so the marker follows it down. Increases are handled above, by the
+    // amount actually distributed, which keeps reflections that arrive while
+    // nothing is staked available for the next update.
+    if current_balance < project.last_reflection_balance {
+        project.last_reflection_balance = current_balance;
+    }
     project.last_reflection_update_time = effective_now;
     
     if stake.amount > 0 {
@@ -3394,12 +3551,14 @@ fn update_reward(project: &mut Account<Project>, stake: &mut Account<Stake>) -> 
                 .checked_div(project.total_staked as u128)
                 .ok_or(ErrorCode::DivisionByZero)?;
             
-            require!(result_u128 <= u64::MAX as u128, ErrorCode::MathOverflow);
-            let rewards_per_token = result_u128 as u64;
+            let rewards_per_token = if result_u128 > u64::MAX as u128 {
+                u64::MAX
+            } else {
+                result_u128 as u64
+            };
             
             project.reward_per_token_stored = project.reward_per_token_stored
-                .checked_add(rewards_per_token)
-                .ok_or(ErrorCode::MathOverflow)?;
+                .saturating_add(rewards_per_token);
         }
     }
     
@@ -3436,18 +3595,19 @@ fn update_reward(project: &mut Account<Project>, stake: &mut Account<Stake>) -> 
         
         if effective_time > 0 {
             let intermediate = (project.reward_rate_per_second as u128)
-                .checked_mul(effective_time as u128)
-                .ok_or(ErrorCode::MathOverflow)?
-                .checked_mul(stake.amount as u128)
-                .ok_or(ErrorCode::MathOverflow)?;
+                .saturating_mul(effective_time as u128)
+                .saturating_mul(stake.amount as u128);
             
             // ✅ Check rate_mode to use correct formula
             let new_rewards_u128 = if project.rate_mode == 0 {
                 // Fixed APY: reward_rate_per_second has 1e9 scaling
                 // Formula: (amount × rate × time) / 1e9
-                intermediate
-                    .checked_div(1_000_000_000u128)
-                    .ok_or(ErrorCode::DivisionByZero)?
+                // Computed from the configured bps, not the stored per second
+                // rate, which truncates to zero below 316 bps.
+                (stake.amount as u128)
+                    .saturating_mul(project.rate_bps_per_year as u128)
+                    .saturating_mul(effective_time as u128)
+                    / (10_000u128 * 31_536_000u128)
             } else {
                 // Dynamic pool: reward_rate_per_second is lamports/sec for entire pool
                 // Formula: (amount × rate × time) / totalStaked
@@ -3456,12 +3616,16 @@ fn update_reward(project: &mut Account<Project>, stake: &mut Account<Stake>) -> 
                     .ok_or(ErrorCode::DivisionByZero)?
             };
             
-            require!(new_rewards_u128 <= u64::MAX as u128, ErrorCode::MathOverflow);
-            let new_rewards = new_rewards_u128 as u64;
+            // An unpayable figure is dropped rather than pinned at u64::MAX,
+            // which would block that stake's claim permanently.
+            let new_rewards = if new_rewards_u128 > u64::MAX as u128 {
+                0
+            } else {
+                new_rewards_u128 as u64
+            };
             
             stake.rewards_pending = stake.rewards_pending
-                .checked_add(new_rewards)
-                .ok_or(ErrorCode::MathOverflow)?;
+                .checked_add(new_rewards).unwrap_or(stake.rewards_pending);
         }
     }
     
@@ -3533,14 +3697,31 @@ fn update_reflection_internal(
             .checked_div(calc_total_staked as u128)
             .ok_or(ErrorCode::DivisionByZero)?;
         
-        require!(per_token_u128 <= u64::MAX as u128, ErrorCode::MathOverflow);
-        let per_token_rate = per_token_u128 as u64;
+        let per_token_rate = if per_token_u128 > u64::MAX as u128 {
+            u64::MAX
+        } else {
+            per_token_u128 as u64
+        };
         
-        project.reflection_per_token_stored = project.reflection_per_token_stored
-            .checked_add(per_token_rate)
-            .ok_or(ErrorCode::MathOverflow)?;
+        let stored_before = project.reflection_per_token_stored;
+        project.reflection_per_token_stored = stored_before
+            .saturating_add(per_token_rate);
+        let applied_rate = project.reflection_per_token_stored
+            .saturating_sub(stored_before);
         
-        project.last_reflection_balance = calc_current_balance;
+        // Advance the baseline only by what was actually distributed, so the
+        // rounding remainder stays in the pool for the next update.
+        let distributed_u128 = (applied_rate as u128)
+            .saturating_mul(calc_total_staked as u128)
+            / 1_000_000_000u128;
+        let distributed = if distributed_u128 > calc_new_tokens as u128 {
+            calc_new_tokens
+        } else {
+            distributed_u128 as u64
+        };
+        project.last_reflection_balance = project
+            .last_reflection_balance
+            .saturating_add(distributed);
         project.last_reflection_update_time = current_time;
     }
     
@@ -4472,7 +4653,10 @@ pub struct DepositRewards<'info> {
     pub project: Box<Account<'info, Project>>,
     
     /// CHECK: Can be TokenAccount (SPL) or wallet (Native SOL)
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = reward_vault.key() == project.reward_vault @ ErrorCode::UnauthorizedVault
+    )]
     pub reward_vault: AccountInfo<'info>,
     
     /// CHECK: Can be TokenAccount (SPL) or wallet (Native SOL)
@@ -4541,42 +4725,6 @@ pub struct SetCustomFees1<'info> {
 
 #[derive(Accounts)]
 #[instruction(token_mint: Pubkey, pool_id: u64)]
-pub struct PlatformUnpause<'info> {
-    #[account(
-        seeds = [b"platform_v2"],
-        bump = platform.bump,
-        constraint = platform.admin == admin.key() @ ErrorCode::Unauthorized
-    )]
-    pub platform: Account<'info, Platform>,
-
-    #[account(
-        mut,
-        seeds = [b"project", token_mint.as_ref(), &pool_id.to_le_bytes()],
-        bump = project.bump
-    )]
-    pub project: Account<'info, Project>,
-
-    #[account(mut)]
-    pub admin: Signer<'info>,
-}
-
-#[derive(Accounts)]
-#[instruction(token_mint: Pubkey, pool_id: u64)]
-pub struct PauseControl<'info> {
-    #[account(
-        mut,
-        seeds = [b"project", token_mint.as_ref(), &pool_id.to_le_bytes()],
-        bump = project.bump,
-        constraint = project.admin == admin.key() @ ErrorCode::Unauthorized
-    )]
-    pub project: Account<'info, Project>,
-    
-    #[account(mut)]
-    pub admin: Signer<'info>,
-}
-
-#[derive(Accounts)]
-#[instruction(token_mint: Pubkey, pool_id: u64)]
 pub struct TransferAdmin<'info> {
     #[account(
         mut,
@@ -4616,9 +4764,40 @@ pub struct TransferPlatformAdmin<'info> {
         constraint = platform.admin == admin.key() @ ErrorCode::Unauthorized
     )]
     pub platform: Account<'info, Platform>,
+
+    #[account(
+        init_if_needed,
+        payer = admin,
+        space = 8 + 32 + 1,
+        seeds = [b"pending_admin"],
+        bump
+    )]
+    pub pending_admin: Account<'info, PendingAdmin>,
     
     #[account(mut)]
     pub admin: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct AcceptPlatformAdmin<'info> {
+    #[account(
+        mut,
+        seeds = [b"platform_v2"],
+        bump = platform.bump
+    )]
+    pub platform: Account<'info, Platform>,
+
+    #[account(
+        mut,
+        seeds = [b"pending_admin"],
+        bump = pending_admin.bump
+    )]
+    pub pending_admin: Account<'info, PendingAdmin>,
+
+    #[account(mut)]
+    pub new_admin: Signer<'info>,
 }
 
 #[derive(Accounts)]
@@ -4668,6 +4847,58 @@ pub struct ExtendLock<'info> {
 
     #[account(mut)]
     pub user: Signer<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(token_mint: Pubkey, pool_id: u64)]
+pub struct SettleStake<'info> {
+    #[account(
+        mut,
+        seeds = [b"project", token_mint.as_ref(), &pool_id.to_le_bytes()],
+        bump = project.bump
+    )]
+    pub project: Account<'info, Project>,
+
+    #[account(
+        mut,
+        seeds = [b"stake", project.key().as_ref(), stake.user.as_ref()],
+        bump = stake.bump,
+        constraint = stake.project == project.key() @ ErrorCode::InvalidProject
+    )]
+    pub stake: Account<'info, Stake>,
+
+    #[account(
+        seeds = [b"crank_authority"],
+        bump = crank.bump,
+        constraint = crank.authority == cranker.key() @ ErrorCode::Unauthorized
+    )]
+    pub crank: Account<'info, CrankAuthority>,
+
+    pub cranker: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct SetCrankAuthority<'info> {
+    #[account(
+        seeds = [b"platform_v2"],
+        bump = platform.bump,
+        constraint = platform.admin == admin.key() @ ErrorCode::Unauthorized
+    )]
+    pub platform: Account<'info, Platform>,
+
+    #[account(
+        init_if_needed,
+        payer = admin,
+        space = 8 + 32 + 1,
+        seeds = [b"crank_authority"],
+        bump
+    )]
+    pub crank: Account<'info, CrankAuthority>,
+
+    #[account(mut)]
+    pub admin: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -4749,7 +4980,7 @@ pub struct ClaimExtraReward<'info> {
         constraint = extra_reward.project == project.key() @ ErrorCode::InvalidProject,
         constraint = extra_reward.beneficiary == beneficiary.key() @ ErrorCode::Unauthorized
     )]
-    pub extra_reward: Account<'info, ExtraReward>,
+    pub extra_reward: Box<Account<'info, ExtraReward>>,
 
     #[account(
         seeds = [b"stake", project.key().as_ref(), beneficiary.key().as_ref()],
@@ -4757,7 +4988,7 @@ pub struct ClaimExtraReward<'info> {
         constraint = stake.user == beneficiary.key() @ ErrorCode::Unauthorized,
         constraint = stake.project == project.key() @ ErrorCode::InvalidProject
     )]
-    pub stake: Account<'info, Stake>,
+    pub stake: Box<Account<'info, Stake>>,
 
     #[account(
         mut,
@@ -4769,7 +5000,7 @@ pub struct ClaimExtraReward<'info> {
         constraint = project.reflection_vault.map_or(true, |v| extra_vault.key() != v) @ ErrorCode::ExtraRewardMintConflict,
         constraint = project.reflection_token.map_or(true, |t| extra_reward.mint != t) @ ErrorCode::ExtraRewardMintConflict
     )]
-    pub extra_vault: InterfaceAccount<'info, TokenAccount>,
+    pub extra_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 
     #[account(
         mut,
@@ -4777,10 +5008,10 @@ pub struct ClaimExtraReward<'info> {
         constraint = destination.owner == beneficiary.key()
             || destination.owner == stake.withdrawal_wallet @ ErrorCode::InvalidWithdrawalWallet
     )]
-    pub destination: InterfaceAccount<'info, TokenAccount>,
+    pub destination: Box<InterfaceAccount<'info, TokenAccount>>,
 
     #[account(constraint = extra_mint_account.key() == extra_reward.mint @ ErrorCode::InvalidExtraRewardVault)]
-    pub extra_mint_account: InterfaceAccount<'info, Mint>,
+    pub extra_mint_account: Box<InterfaceAccount<'info, Mint>>,
 
     #[account(mut)]
     pub beneficiary: Signer<'info>,
@@ -4793,6 +5024,24 @@ pub struct ClaimExtraReward<'info> {
 pub struct PlatformAdminTransferred {
     pub old_admin: Pubkey,
     pub new_admin: Pubkey,
+}
+
+#[event]
+pub struct PlatformAdminTransferProposed {
+    pub current_admin: Pubkey,
+    pub proposed_admin: Pubkey,
+}
+
+#[account]
+pub struct PendingAdmin {
+    pub pending: Pubkey,
+    pub bump: u8,
+}
+
+#[account]
+pub struct CrankAuthority {
+    pub authority: Pubkey,
+    pub bump: u8,
 }
 
 #[event]
@@ -5249,6 +5498,18 @@ pub enum ErrorCode {
     LockupTooLong,
     #[msg("Fee exceeds the maximum allowed")]
     FeeTooHigh,
+    #[msg("Native SOL is not supported as a staking or reward asset")]
+    NativeSolUnsupported,
+    #[msg("Only the lock owner can deposit into this lock")]
+    LockNotOwnedByDepositor,
+    #[msg("The mint argument does not match the supplied mint account")]
+    MintArgumentMismatch,
+    #[msg("The configured reflection mint does not match the reflection account")]
+    ReflectionMintMismatch,
+    #[msg("Fixed APY requires the reward token to be the staking token")]
+    FixedModeRequiresSameMint,
+    #[msg("Deposit is too small to increase the reward rate")]
+    ZeroRateIncrement,
 }
 
 // 100 years. Far above any legitimate lock and far below the point where a

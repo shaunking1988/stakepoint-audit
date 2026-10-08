@@ -1,0 +1,21 @@
+StakePoint audit remediation release
+
+Remediated source     lib_remediated_2026-10-08.rs
+                      also at programs/staking-program/src/lib.rs so the workspace builds it
+Previous source       lib_current_deployed.rs, unchanged, as reviewed
+
+Program ID            gLHaGJsZ6G7AXZxoDL9EsSWkRbKAWhFHi73gVfNXuzK
+ProgramData           46XyGNqwPScDoeayDVWZrkKpvn4eUBdvrB3SY2TRReAm
+Upgrade authority     9BMgyCjMsPmSTedyJtc6B1VaFqHugyHQsbbMADMGSHbF (Squads 3-of-4)
+Deployed in slot      454638982
+Previous slot         453574257
+Deployed              2026-10-08
+
+Binary size           1065104 bytes
+Binary sha256         2d820fdb5fa61fb403581e642c1e068dccdcebae8f5cdb461e60e6fcd5740c2e
+
+Toolchain             anchor 0.32.1, cargo build-sbf 2.3.12, rustc 1.84.1
+Build command         anchor build, from the workspace root
+Release profile       overflow-checks = true, lto = "fat", codegen-units = 1
+
+On-chain IDL          updated and verified in the same release
