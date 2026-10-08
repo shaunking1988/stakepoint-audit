@@ -1,0 +1,8 @@
+solana-cargo-build-sbf 2.3.12
+platform-tools v1.48
+rustc 1.84.1
+build command: anchor build (not containerized)
+workspace root: staking-program/
+deployed artifact: target/deploy/staking_program.so
+size: 1004520 bytes
+sha256: 78836f21ca1541df900a2bd4ccb86ac4800cd166d5e807da30b6905d79dcbeca
